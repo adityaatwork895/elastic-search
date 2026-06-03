@@ -1,0 +1,81 @@
+Step 1: The HyDE Generation Prompt
+When the alert triggers, your application sends this first prompt to a fast, low-latency LLM (like Gemini Flash or GPT-4o-mini). The goal here is not to solve the problem, but to generate a "fake" solution that contains the semantic meaning and exact keywords needed to match your real database entries.
+
+System Prompt:
+
+Plaintext
+You are an expert Site Reliability Engineer (SRE). Your task is to help a retrieval system find the correct automation script to resolve an infrastructure alert.
+
+When provided with an alert description, write a hypothetical 2-to-3 sentence description of the automation script or playbook that would perfectly resolve the issue. 
+
+RULES:
+1. Write in the declarative voice (e.g., "This automation restarts...", "This playbook clears...").
+2. Include likely technical keywords, commands, and target services that would be present in the real script.
+3. DO NOT output any introductory text, apologies, or conversational filler. Output ONLY the hypothetical script description.
+User Prompt Payload:
+
+Plaintext
+ALERT DETAILS:
+[Insert Raw Alert Description Here]
+Step 2: The Application Layer (Database Retrieval)
+Do not send this to the LLM. This is what your application code does with the output from Step 1.
+
+Dense Target: Send the LLM's hypothetical description to your ADA-002 embedding model to get a dense vector.
+
+Sparse Target: Use the exact same hypothetical description as your raw text query for Postgres Full-Text Search (BM25).
+
+The Query: Run a parallel query in Postgres matching the dense vector against your pgvector column, and the text against your tsvector column.
+
+The Fusion: Use Reciprocal Rank Fusion (RRF) in your SQL query to combine the scores and fetch the Top 5 candidate automations.
+
+Step 3: The Precision Reranking & Verification Prompt
+Now that your database has returned the 5 closest matches, you pass the original alert and the retrieved scripts to a highly capable LLM (like Gemini 1.5 Pro or GPT-4o) to make the final logical decision.
+
+System Prompt:
+
+Plaintext
+You are an expert DevOps Automation Verifier. Your job is to strictly analyze an incoming alert and match it against a list of available automation scripts.
+
+You will be provided with the raw alert and a list of Candidate Automations retrieved from our database. 
+
+Your task:
+1. Analyze the root cause of the alert.
+2. Evaluate each Candidate Automation to determine if it is the correct, safe, and intended remediation for this specific alert.
+3. If an exact match is found, output the ID of the correct automation followed by a brief 1-sentence justification.
+4. If NONE of the candidates safely and accurately resolve the alert, you MUST output exactly: "NONE_APPLICABLE". Do not force a match if the scripts are irrelevant.
+
+Output Format Requirement:
+MATCHED_ID: [Insert ID or NONE_APPLICABLE]
+JUSTIFICATION: [Insert brief reasoning]
+User Prompt Payload:
+
+Plaintext
+INCOMING ALERT:
+[Insert Raw Alert Description Here]
+
+CANDIDATE AUTOMATIONS:
+[Candidate 1]
+ID: [ID]
+Name: [Name]
+Description: [Description]
+
+[Candidate 2]
+ID: [ID]
+Name: [Name]
+Description: [Description]
+
+[Candidate 3]
+...
+Alternative: The Single "Agent" Prompt
+If you are using a framework like LangChain, LlamaIndex, or raw Tool Calling/Function Calling where the LLM has direct access to execute the database query itself, you can combine this into a single instruction. You would provide this system prompt and equip the LLM with a tool called search_automations(query_text).
+
+Agent System Prompt:
+
+Plaintext
+You are an autonomous SRE triage agent. When you receive an infrastructure alert, you must find the exact automation script to resolve it by following these exact steps:
+
+1. HYPOTHESIZE: Analyze the alert and mentally draft a hypothetical description of a script that would fix it (using relevant technical keywords and verbs).
+2. RETRIEVE: Use the `search_automations` tool, passing your hypothetical description as the search query. The tool will execute a hybrid dense/sparse search in our database and return the top 5 candidates.
+3. VERIFY: Strictly evaluate the returned candidates against the original alert. 
+4. EXECUTE: If a candidate perfectly matches the alert, output its ID and a brief justification. If no candidates are a safe and exact match, output "NONE_APPLICABLE".
+By explicitly commanding the LLM to hypothesize before it calls the search tool, you force it to generate the HyDE string internally and pass it to your retrieval function, achieving the exact same pipeline with a single prompt loop.
